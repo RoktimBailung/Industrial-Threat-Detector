@@ -3,80 +3,229 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>IOCL Threat Detector</title>
-    <!-- We are using Tailwind CSS (via CDN) to make the page look good instantly -->
+    <title>IOCL Threat Intelligence</title>
+    <!-- Tailwind CSS for styling -->
     <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+        // Official IOCL Brand Colors
+        tailwind.config = {
+            theme: {
+                extend: {
+                    colors: {
+                        iocl: {
+                            orange: '#F58220', // Saffron
+                            navy: '#002B5C',   // Deep Blue
+                            light: '#f8fafc',
+                            gray: '#f1f5f9'
+                        }
+                    }
+                }
+            }
+        }
+    </script>
 </head>
-<body class="bg-gray-900 text-white font-sans min-h-screen p-8">
+<body class="bg-slate-50 text-slate-800 font-sans min-h-screen flex flex-col">
 
-    <div class="max-w-4xl mx-auto">
-        <!-- Header Section -->
-        <header class="flex justify-between items-center border-b border-gray-700 pb-4 mb-8">
-            <h1 class="text-3xl font-bold text-blue-400">Industrial Threat Detector</h1>
-            <span class="bg-green-500 text-white px-3 py-1 rounded-full text-sm font-semibold">System Online</span>
-        </header>
-
-        <!-- Main Content Grid -->
-        <div class="grid grid-cols-1 md:grid-cols-3 gap-8">
+    <!-- Top Navigation Bar (Corporate Style) -->
+    <header class="bg-white border-b-4 border-iocl-orange shadow-md px-6 py-3 flex justify-between items-center sticky top-0 z-50">
+        <div class="flex items-center gap-3">
+            <!-- Official IOCL Logo from your static folder -->
+            <img src="/static/logo.jpg" alt="IndianOil Logo" class="h-12 w-auto object-contain">
             
-            <!-- Video Feed Area (Takes up 2/3 of the space) -->
-            <div class="md:col-span-2 bg-gray-800 rounded-lg p-4 border border-gray-700 shadow-lg">
-                <h2 class="text-xl font-semibold mb-4 text-gray-300">Live Camera Feed</h2>
-                <!-- This black box is a placeholder for Phase 3 where the real video will go -->
-                <div class="w-full bg-black aspect-video rounded flex items-center justify-center border border-gray-600">
-                    <p class="text-gray-500 text-lg">Camera Feed Offline (Awaiting Phase 3)</p>
+            <span class="text-2xl font-extrabold text-iocl-navy tracking-tighter">IndianOil</span>
+            
+            <div class="h-8 w-px bg-slate-300 mx-2"></div>
+            
+            <h1 class="text-xl font-bold text-iocl-navy tracking-wide">Threat Intelligence Center</h1>
+        </div>
+        
+        <div class="flex items-center gap-6 text-sm">
+            <div class="flex items-center gap-2 bg-green-50 px-3 py-1.5 rounded-full border border-green-200 shadow-sm">
+                <span class="relative flex h-3 w-3">
+                  <span class="animate-ping absolute inline-flex h-full w-full rounded-full bg-green-400 opacity-75"></span>
+                  <span class="relative inline-flex rounded-full h-3 w-3 bg-green-500"></span>
+                </span>
+                <span class="font-bold text-green-700 uppercase tracking-wider text-xs">System Secure</span>
+            </div>
+            <div id="liveClock" class="font-mono bg-iocl-navy text-white px-4 py-1.5 rounded shadow-sm font-semibold tracking-wider">
+                00:00:00
+            </div>
+        </div>
+    </header>
+
+    <!-- Main Dashboard Layout -->
+    <main class="flex-1 p-6 max-w-7xl mx-auto w-full grid grid-cols-1 lg:grid-cols-4 gap-6">
+        
+        <!-- Left Column: Video & Table (Takes up 3 columns) -->
+        <div class="lg:col-span-3 flex flex-col gap-6">
+            
+            <!-- Quick Stats Row -->
+            <div class="grid grid-cols-3 gap-4">
+                <div class="bg-white p-5 rounded-xl border border-slate-200 shadow-sm border-l-4 border-l-iocl-navy">
+                    <p class="text-slate-500 text-xs font-bold uppercase tracking-wider mb-1">Active Cameras</p>
+                    <p class="text-3xl font-extrabold text-iocl-navy">01 <span class="text-lg font-medium text-slate-400">/ 12</span></p>
+                </div>
+                <div class="bg-white p-5 rounded-xl border border-slate-200 shadow-sm border-l-4 border-l-iocl-orange">
+                    <p class="text-slate-500 text-xs font-bold uppercase tracking-wider mb-1">AI Engine Status</p>
+                    <p class="text-2xl font-bold text-iocl-orange mt-1">Standby Mode</p>
+                </div>
+                <div class="bg-white p-5 rounded-xl border border-slate-200 shadow-sm border-l-4 border-l-red-500">
+                    <p class="text-slate-500 text-xs font-bold uppercase tracking-wider mb-1">Incidents Today</p>
+                    <p class="text-3xl font-extrabold text-slate-800" id="incidentCount">0</p>
                 </div>
             </div>
 
-            <!-- Controls Panel Area (Takes up 1/3 of the space) -->
-            <div class="bg-gray-800 rounded-lg p-4 border border-gray-700 shadow-lg flex flex-col">
-                <h2 class="text-xl font-semibold mb-4 text-gray-300">System Controls</h2>
+            <!-- CCTV Feed Container -->
+            <div class="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden flex flex-col">
+                <div class="bg-slate-100 px-5 py-3 border-b border-slate-200 flex justify-between items-center">
+                    <span class="text-sm font-bold text-iocl-navy tracking-wide flex items-center gap-2">
+                        <svg class="w-5 h-5 text-iocl-orange" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 10l4.553-2.276A1 1 0 0121 8.618v6.764a1 1 0 01-1.447.894L15 14M5 18h8a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v8a2 2 0 002 2z"></path></svg>
+                        CAM_01: MAIN REFINERY SECTOR A
+                    </span>
+                    <span class="text-xs font-bold bg-red-100 text-red-600 px-2 py-1 rounded border border-red-200 flex items-center gap-1">
+                        <div class="h-2 w-2 bg-red-600 rounded-full animate-pulse"></div> REC
+                    </span>
+                </div>
                 
-                <p class="text-sm text-gray-400 mb-6">
-                    Use this panel to test the server, database, and SMS pipeline before the AI is ready.
+                <div class="w-full bg-slate-900 aspect-video relative flex items-center justify-center">
+                    <!-- Scanline overlay effect -->
+                    <div class="absolute inset-0 bg-[linear-gradient(rgba(255,255,255,0.03)_1px,transparent_1px)] bg-[size:100%_4px] pointer-events-none"></div>
+                    
+                    <p class="text-slate-400 text-lg font-mono animate-pulse">Awaiting YOLOv8 Video Stream...</p>
+                    
+                    <!-- Fake CCTV Overlay text -->
+                    <div class="absolute bottom-4 left-4 text-white/50 font-mono text-xs">
+                        SYS: IOCL_SEC_NET<br>ZONE: HAZARDOUS_MAT
+                    </div>
+                </div>
+            </div>
+            
+            <!-- Mock Table for Recent Logs -->
+            <div class="bg-white rounded-xl border border-slate-200 shadow-sm p-5">
+                <h3 class="text-lg font-bold text-iocl-navy mb-4 border-b border-slate-100 pb-2">Recent Event Logs</h3>
+                <div class="overflow-x-auto">
+                    <table class="w-full text-sm text-left">
+                        <thead class="text-xs text-slate-500 uppercase bg-slate-50">
+                            <tr>
+                                <th class="px-4 py-3 rounded-tl font-bold">Timestamp</th>
+                                <th class="px-4 py-3 font-bold">Event Classification</th>
+                                <th class="px-4 py-3 font-bold">AI Confidence</th>
+                                <th class="px-4 py-3 rounded-tr font-bold">Action Taken</th>
+                            </tr>
+                        </thead>
+                        <tbody id="logTableBody">
+                            <tr class="border-b border-slate-100 text-slate-600">
+                                <td class="px-4 py-3 font-mono text-xs">--:--:--</td>
+                                <td class="px-4 py-3 font-medium">System Boot Sequence</td>
+                                <td class="px-4 py-3">100%</td>
+                                <td class="px-4 py-3"><span class="bg-slate-100 text-slate-600 px-2 py-1 rounded text-xs font-semibold border border-slate-200">System Logged</span></td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+
+        </div>
+
+        <!-- Right Column: Controls -->
+        <div class="flex flex-col gap-6">
+            
+            <!-- System Controls Panel -->
+            <div class="bg-white rounded-xl border border-slate-200 shadow-sm p-5 sticky top-24">
+                <h2 class="text-lg font-bold text-iocl-navy mb-2">System Diagnostics</h2>
+                <div class="h-1 w-12 bg-iocl-orange mb-4"></div>
+                <p class="text-sm text-slate-500 mb-6 leading-relaxed">
+                    Use this panel to manually trigger a threat event. This will test the database connection and dispatch an automated SMS alert to the registered safety officer.
                 </p>
 
-                <!-- Our Simulation Button -->
-                <button id="simulateBtn" class="bg-red-600 hover:bg-red-700 text-white font-bold py-3 px-4 rounded w-full transition duration-200">
-                    🔥 Simulate Fire Event
+                <!-- Upgraded Button using IOCL Orange -->
+                <button id="simulateBtn" class="w-full bg-iocl-orange hover:bg-orange-600 shadow-lg shadow-orange-500/30 text-white font-bold py-3 px-4 rounded-lg transition-all duration-200 flex items-center justify-center gap-2 group transform active:scale-95">
+                    <span class="group-hover:scale-125 transition-transform text-xl">⚠️</span> Simulate Fire Alert
                 </button>
 
-                <!-- A spot to show messages from the server -->
-                <div id="statusMessage" class="mt-6 text-sm text-center hidden p-3 rounded"></div>
+                <div id="statusMessage" class="mt-6 text-sm text-center hidden p-3 rounded-lg font-bold border"></div>
+                
+                <!-- Extra corporate detail -->
+                <div class="mt-8 pt-4 border-t border-slate-100 text-center">
+                    <p class="text-xs text-slate-400">Authorized Personnel Only</p>
+                    <p class="text-[10px] text-slate-400 mt-1">IOCL Security Dept. v1.0</p>
+                </div>
             </div>
-        </div>
-    </div>
 
-    <!-- Javascript to make the button actually communicate with app.py -->
+        </div>
+
+    </main>
+
+    <!-- Javascript -->
     <script>
+        // Live Clock Script
+        function updateClock() {
+            const now = new Date();
+            document.getElementById('liveClock').innerText = now.toLocaleTimeString('en-IN', { hour12: false });
+        }
+        setInterval(updateClock, 1000);
+        updateClock();
+
+        // Simulation Button Script
         const simulateBtn = document.getElementById('simulateBtn');
         const statusMessage = document.getElementById('statusMessage');
+        const logTableBody = document.getElementById('logTableBody');
+        const incidentCount = document.getElementById('incidentCount');
+        let count = 0;
 
         simulateBtn.addEventListener('click', function() {
-            // Change button text while processing
-            simulateBtn.innerText = "Processing...";
+            simulateBtn.innerText = "Processing Alert...";
             simulateBtn.disabled = true;
+            simulateBtn.classList.replace('bg-iocl-orange', 'bg-slate-400');
+            simulateBtn.classList.replace('hover:bg-orange-600', 'hover:bg-slate-500');
+            simulateBtn.classList.remove('shadow-orange-500/30');
 
-            // Send a POST request to our Flask server's Route 2
-            fetch('/simulate_threat', {
-                method: 'POST',
-            })
+            fetch('/simulate_threat', { method: 'POST' })
             .then(response => response.json())
             .then(data => {
-                // Show the success message on the screen
+                // UI Message Update (Light Theme Success)
+                statusMessage.style.display = "block";
                 statusMessage.innerText = data.message;
-                statusMessage.classList.remove('hidden', 'bg-red-900');
-                statusMessage.classList.add('bg-green-800', 'text-green-100');
+                statusMessage.className = "mt-6 text-sm text-center p-3 rounded-lg font-bold border bg-green-50 text-green-700 border-green-200 shadow-sm";
                 
-                // Reset the button
-                simulateBtn.innerText = "🔥 Simulate Fire Event";
+                // Add to Mock Table dynamically (Light Theme Alert Row)
+                const timeStr = new Date().toLocaleTimeString('en-IN', {hour: '2-digit', minute:'2-digit', second:'2-digit'});
+                const newRow = `<tr class="border-b border-red-100 bg-red-50/50">
+                    <td class="px-4 py-3 font-mono text-xs text-slate-700">${timeStr}</td>
+                    <td class="px-4 py-3 font-bold text-red-600 flex items-center gap-2">
+                        <span class="h-2 w-2 rounded-full bg-red-600 inline-block"></span> Fire Detected
+                    </td>
+                    <td class="px-4 py-3 font-semibold text-slate-700">95.0%</td>
+                    <td class="px-4 py-3">
+                        <span class="bg-green-100 text-green-700 border border-green-200 px-2 py-1 rounded text-xs font-bold shadow-sm">
+                            SMS Dispatched
+                        </span>
+                    </td>
+                </tr>`;
+                logTableBody.insertAdjacentHTML('afterbegin', newRow);
+                
+                // Update Counter
+                count++;
+                incidentCount.innerText = count;
+                incidentCount.classList.replace('text-slate-800', 'text-red-600');
+
+                // Reset Button
+                simulateBtn.innerHTML = "<span class='group-hover:scale-125 transition-transform text-xl'>⚠️</span> Simulate Fire Alert";
+                simulateBtn.classList.replace('bg-slate-400', 'bg-iocl-orange');
+                simulateBtn.classList.replace('hover:bg-slate-500', 'hover:bg-orange-600');
+                simulateBtn.classList.add('shadow-orange-500/30');
                 simulateBtn.disabled = false;
             })
             .catch((error) => {
                 console.error('Error:', error);
-                statusMessage.innerText = "Failed to reach server.";
-                statusMessage.classList.remove('hidden');
-                simulateBtn.innerText = "🔥 Simulate Fire Event";
+                statusMessage.style.display = "block";
+                statusMessage.innerText = "Network Error: Failed to reach server.";
+                statusMessage.className = "mt-6 text-sm text-center p-3 rounded-lg font-bold border bg-red-50 text-red-700 border-red-200 shadow-sm";
+                
+                simulateBtn.innerHTML = "<span class='group-hover:scale-125 transition-transform text-xl'>⚠️</span> Simulate Fire Alert";
+                simulateBtn.classList.replace('bg-slate-400', 'bg-iocl-orange');
+                simulateBtn.classList.replace('hover:bg-slate-500', 'hover:bg-orange-600');
+                simulateBtn.classList.add('shadow-orange-500/30');
                 simulateBtn.disabled = false;
             });
         });
