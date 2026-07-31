@@ -1,173 +1,245 @@
 import cv2
-from ultralytics import YOLO
-from flask import Flask, render_template, jsonify, Response
-from alerts import log_incident, send_sms_alert
 import time
+import threading
 import os
+from datetime import datetime
+from flask import Flask, render_template, Response, jsonify
+from ultralytics import YOLO
 import mysql.connector
+from twilio.rest import Client
+from dotenv import load_dotenv
 
+# Load environment variables (for Twilio keys)
+load_dotenv()
+
+# --- DATABASE SETUP ---
+def get_db_connection():
+    return mysql.connector.connect(
+        host="localhost",
+        user="python_user",     # Your specific database user
+        password="Roktim@01",   # Your specific MySQL password
+        database="refinery_safety"
+    )
+
+# --- TWILIO SETUP ---
+def send_sms_alert(hazard_type, confidence):
+    try:
+        account_sid = os.getenv('TWILIO_ACCOUNT_SID')
+        auth_token = os.getenv('TWILIO_AUTH_TOKEN')
+        twilio_phone = os.getenv('TWILIO_FROM_NUMBER')
+        recipient_phone = os.getenv('TWILIO_TO_NUMBER')
+
+        if not all([account_sid, auth_token, twilio_phone, recipient_phone]):
+            print("TWILIO ERROR: Missing credentials in .env file.")
+            return
+
+        client = Client(account_sid, auth_token)
+        message_body = f"⚠️ URGENT IOCL ALERT: {hazard_type} detected with {confidence}% confidence! Please check the dashboard immediately."
+        
+        message = client.messages.create(
+            body=message_body,
+            from_=twilio_phone,
+            to=recipient_phone
+        )
+        print(f"SMS Sent Successfully. SID: {message.sid}")
+    except Exception as e:
+        print(f"Failed to send SMS: {e}")
+
+# --- AI & APP SETUP ---
 app = Flask(__name__)
-
-# Load the new, highly-trained AI model
-print("Loading IOCL Safety AI Engine (YOLOv8s - 50 Epochs)...")
+print("Loading YOLOv8 AI Model... Please wait.")
 model = YOLO('models/best.pt')
 
-# Tracking variables for automatic alerts
-alert_cooldown = 0
-COOLDOWN_SECONDS = 30 # Wait 30 seconds between sending automated SMS alerts
+# Ensure incidents folder exists
+if not os.path.exists('static/incidents'):
+    os.makedirs('static/incidents')
 
-# --- Persistence Tracking ---
-consecutive_threat_frames = 0
-REQUIRED_THREAT_FRAMES = 3  # Threat must be visible for 3 consecutive frames to trigger (Tuned to 0.75)
+# --- THREADED CAMERA CLASS (ANTI-LAG FIX) ---
+class VideoCamera:
+    def __init__(self, src=0):
+        print("Initializing Camera...")
+        self.stream = cv2.VideoCapture(src)
+        if not self.stream.isOpened():
+            print("CRITICAL ERROR: Camera could not be opened. Check if another app is using it.")
+        
+        # Lower resolution to help processor process frames faster
+        self.stream.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+        self.stream.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+        
+        (self.grabbed, self.frame) = self.stream.read()
+        self.stopped = False
+        self.lock = threading.Lock()
 
-# Ensure the snapshot directory exists
-SNAPSHOT_DIR = os.path.join('static', 'incidents')
-if not os.path.exists(SNAPSHOT_DIR):
-    os.makedirs(SNAPSHOT_DIR)
+    def start(self):
+        # Start the thread to read frames from the video stream
+        threading.Thread(target=self.update, args=(), daemon=True).start()
+        return self
+
+    def update(self):
+        # Keep looping infinitely until the thread is stopped
+        while not self.stopped:
+            (grabbed, frame) = self.stream.read()
+            with self.lock:
+                self.grabbed = grabbed
+                self.frame = frame
+
+    def read(self):
+        # Return the latest frame
+        with self.lock:
+            if self.frame is not None:
+                return self.frame.copy()
+            return None
+
+    def stop(self):
+        self.stopped = True
+        self.stream.release()
+
+# Start the threaded camera globally
+camera = VideoCamera().start()
+time.sleep(1.0) # Give the camera 1 second to warm up
+
+# --- LOGIC VARIABLES ---
+last_alert_time = 0
+ALERT_COOLDOWN = 30  # Wait 30 seconds before sending another SMS
+REQUIRED_THREAT_FRAMES = 3
+CONF_THRESHOLD = 0.75
+threat_frame_count = 0
 
 def generate_frames():
-    """Captures webcam frames, runs AI, and streams to dashboard."""
-    global alert_cooldown, consecutive_threat_frames
+    global last_alert_time, threat_frame_count
     
-    cap = cv2.VideoCapture(0) # Open the webcam
-    
-    if not cap.isOpened():
-        print("Error: Could not open webcam.")
-        return
-
     while True:
-        success, frame = cap.read()
-        if not success:
-            break
-            
-        # Run YOLOv8 inference on the frame
-        # conf=0.75 means 75% confidence required to even draw a box
-        results = model(frame, conf=0.75, stream=True)
-        annotated_frame = frame
+        # 1. Grab the absolute newest frame from the background thread
+        frame = camera.read()
         
-        highest_confidence = 0
+        if frame is None:
+            time.sleep(0.1)
+            continue
+            
+        # 2. Run the AI Model on this frame
+        results = model(frame, stream=True, verbose=False)
+        
         hazard_detected = None
+        highest_confidence = 0.0
         
+        # 3. Analyze Results
         for r in results:
-            annotated_frame = r.plot() # Draw the boxes
-            
-            # Check if YOLO found anything dangerous
-            for box in r.boxes:
-                # box.cls[0] is the class ID (e.g., 0 for Fire, 1 for Smoke)
-                # box.conf[0] is the confidence score
-                class_id = int(box.cls[0])
+            boxes = r.boxes
+            for box in boxes:
                 confidence = float(box.conf[0])
-                class_name = model.names[class_id]
-                
-                if class_name in ["fire", "smoke"] and confidence > highest_confidence:
-                    highest_confidence = confidence
-                    hazard_detected = class_name
-        
-        # --- UPGRADED AUTOMATIC ALERT LOGIC ---
-        current_time = time.time()
-        
-        # Check if we see a hazard right now
+                if confidence >= CONF_THRESHOLD:
+                    cls = int(box.cls[0])
+                    class_name = model.names[cls]
+                    
+                    # Detect Fire, Smoke, or Vapour
+                    if class_name.lower() in ['fire', 'smoke', 'vapour', 'vapor']:
+                        hazard_detected = class_name
+                        if confidence > highest_confidence:
+                            highest_confidence = confidence
+                    
+                    # Draw Bounding Box dynamically based on threat
+                    x1, y1, x2, y2 = map(int, box.xyxy[0])
+                    
+                    if class_name.lower() == 'fire':
+                        color = (0, 0, 255) # Red
+                    elif 'vapour' in class_name.lower() or 'vapor' in class_name.lower():
+                        color = (0, 165, 255) # Orange
+                    else:
+                        color = (150, 150, 150) # Gray for Smoke
+                        
+                    cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
+                    label = f"{class_name.upper()} {confidence:.2f}"
+                    cv2.putText(frame, label, (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
+
+        # 4. Threat Logic (Persistence & Cooldown)
         if hazard_detected:
-            consecutive_threat_frames += 1
+            threat_frame_count += 1
+            if threat_frame_count >= REQUIRED_THREAT_FRAMES:
+                current_time = time.time()
+                if current_time - last_alert_time > ALERT_COOLDOWN:
+                    print(f"\n[ALERT] {hazard_detected.upper()} detected! Logging and sending SMS...")
+                    
+                    # Save a snapshot
+                    timestamp_str = datetime.now().strftime("%Y%m%d_%H%M%S")
+                    filename = f"incident_{timestamp_str}.jpg"
+                    filepath = os.path.join("static", "incidents", filename)
+                    cv2.imwrite(filepath, frame)
+                    
+                    # Log to DB using the CORRECT column names
+                    try:
+                        conn = get_db_connection()
+                        cursor = conn.cursor()
+                        query = "INSERT INTO incident_logs (hazard_type, confidence_score, snapshot_path) VALUES (%s, %s, %s)"
+                        values = (hazard_detected.capitalize() + " Detected", round(highest_confidence * 100, 1), filename)
+                        cursor.execute(query, values)
+                        conn.commit()
+                        cursor.close()
+                        conn.close()
+                    except Exception as e:
+                        print(f"DB Error: {e}")
+                    
+                    # 'Fire and Forget' Background thread for Twilio (Prevents camera freeze!)
+                    threading.Thread(
+                        target=send_sms_alert, 
+                        args=(hazard_detected.capitalize(), round(highest_confidence * 100, 1)),
+                        daemon=True
+                    ).start()
+                    
+                    # Reset timer
+                    last_alert_time = current_time
         else:
-            # If the threat vanishes, reset the counter to prevent false alarms
-            consecutive_threat_frames = 0
-            
-        # Only trigger IF we've seen it consistently AND the cooldown is over
-        if consecutive_threat_frames >= REQUIRED_THREAT_FRAMES and (current_time - alert_cooldown > COOLDOWN_SECONDS):
-            print(f"⚠️ AUTOMATIC ALERT: {hazard_detected.upper()} DETECTED CONFIRMED! Confidence: {highest_confidence:.2f}")
-            
-            # --- NEW: Take a Snapshot ---
-            timestamp_str = time.strftime("%Y%m%d-%H%M%S")
-            filename = f"threat_{hazard_detected}_{timestamp_str}.jpg"
-            filepath = os.path.join(SNAPSHOT_DIR, filename)
-            
-            # Save the image using OpenCV
-            cv2.imwrite(filepath, annotated_frame)
-            print(f"📸 Snapshot saved to: {filepath}")
-            
-            # Fire the database and SMS functions! (Pass the filepath!)
-            log_incident(hazard_detected.capitalize(), float(f"{highest_confidence:.2f}"), filepath)
-            
-            # COMMENT OUT THIS LINE TO TEST WITHOUT USING TWILIO CREDITS
-            send_sms_alert(hazard_detected.capitalize(), float(f"{highest_confidence:.2f}"))
-            
-            # Reset the cooldown timer AND the frame counter
-            alert_cooldown = current_time
-            consecutive_threat_frames = 0
+            # If no hazard seen in this frame, reset the counter
+            threat_frame_count = 0
 
-        # Convert the processed frame into JPEG format for web streaming
-        ret, buffer = cv2.imencode('.jpg', annotated_frame)
+        # 5. Send Frame to Browser
+        ret, buffer = cv2.imencode('.jpg', frame)
+        if not ret:
+            continue
+            
         frame_bytes = buffer.tobytes()
-
-        # Yield the frame in a format HTML can display as a continuous stream
         yield (b'--frame\r\n'
                b'Content-Type: image/jpeg\r\n\r\n' + frame_bytes + b'\r\n')
 
-    cap.release()
-
+# --- WEB ROUTES ---
 @app.route('/')
-def home():
+def index():
     return render_template('index.html')
 
 @app.route('/video_feed')
 def video_feed():
-    """Route that provides the live AI video stream."""
     return Response(generate_frames(), mimetype='multipart/x-mixed-replace; boundary=frame')
 
-@app.route('/simulate_threat', methods=['POST'])
-def simulate_threat():
-    print("WARNING: Simulated Fire Event Triggered!")
-    
-    # Call the database function
-    db_success = log_incident("Fire", 0.95, "N/A")
-    
-    # Call the Twilio SMS function
-    sms_success = send_sms_alert("Fire", 0.95)
-    
-    if db_success and sms_success:
-        return jsonify({"status": "success", "message": "Threat saved to database AND SMS sent!"})
-    elif db_success:
-        return jsonify({"status": "success", "message": "Threat saved, but SMS failed (check terminal)."})
-    else:
-        return jsonify({"status": "error", "message": "Database error!"}), 500
-
-# --- Route to fetch live logs ---
 @app.route('/get_recent_logs')
 def get_recent_logs():
-    """Fetches the 5 most recent incidents from the database."""
-    conn = None
-    cursor = None
     try:
-        conn = mysql.connector.connect(
-            host='localhost',
-            user='python_user',
-            password='Roktim@01',
-            database='refinery_safety'
-        )
-        
+        conn = get_db_connection()
         cursor = conn.cursor(dictionary=True)
-        # Fetch the 5 most recent logs
-        cursor.execute("SELECT hazard_type, confidence_score, snapshot_path, timestamp FROM incident_logs ORDER BY timestamp DESC LIMIT 5")
+        
+        # 1. Fetch recent 5 logs using the correct column names
+        cursor.execute("SELECT timestamp, hazard_type, confidence_score, snapshot_path FROM incident_logs ORDER BY timestamp DESC LIMIT 5")
         logs = cursor.fetchall()
         
-        # Format the timestamp for JSON
+        # Clean up timestamps for the web UI
         for log in logs:
-            if log['timestamp']:
-                # Handle datetime object formatting safely
+            if log.get('timestamp'):
                 log['timestamp'] = log['timestamp'].strftime("%H:%M:%S")
                 
-        return jsonify(logs)
+        # 2. Fetch the actual total count of incidents that happened TODAY
+        cursor.execute("SELECT COUNT(*) as count FROM incident_logs WHERE DATE(timestamp) = CURDATE()")
+        today_count = cursor.fetchone()['count']
         
+        cursor.close()
+        conn.close()
+        
+        # Return both the logs and the total count securely to JS
+        return jsonify({
+            "logs": logs,
+            "today_count": today_count
+        })
     except Exception as e:
-        print(f"Error fetching live logs: {e}")
-        return jsonify([]) # Return empty array so frontend doesn't crash
-        
-    finally:
-        if cursor:
-            cursor.close()
-        if conn and conn.is_connected():
-            conn.close()
+        print(f"Error fetching logs: {e}")
+        return jsonify({"logs": [], "today_count": 0})
 
 if __name__ == '__main__':
-    app.run(debug=True)
+    # Run the server
+    app.run(host='0.0.0.0', port=5000, debug=False, threaded=True)
