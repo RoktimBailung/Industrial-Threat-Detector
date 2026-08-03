@@ -12,7 +12,7 @@ from dotenv import load_dotenv
 # Load environment variables (for Twilio keys)
 load_dotenv()
 
-# --- DATABASE SETUP ---
+# DATABASE SETUP 
 def get_db_connection():
     return mysql.connector.connect(
         host="localhost",
@@ -50,7 +50,7 @@ app = Flask(__name__)
 print("Loading Intel-Optimized YOLOv11 Engine... Please wait.")
 
 # Explicitly passing task='detect' silences the terminal warning
-model = YOLO('models/best.pt', task='detect')
+model = YOLO('models/best_openvino_model', task='detect')
 
 # Ensure incidents folder exists
 if not os.path.exists('static/incidents'):
@@ -173,7 +173,7 @@ def generate_frames():
                 # Trigger immediately on the first high-confidence frame
                 current_time = time.time()
                 if current_time - last_alert_time > ALERT_COOLDOWN:
-                    print(f"\n[CRITICAL THREAT] {hazard_detected.upper()} confirmed by YOLOv11! Logging incident & sending SMS...")
+                    print(f"\n[EVENT] {hazard_detected.upper()} confirmed by YOLOv11! Logging incident...")
                     
                     # Generate snapshot with drawn detections
                     timestamp_str = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -200,14 +200,19 @@ def generate_frames():
                     except Exception as e:
                         print(f"DB Error: {e}")
                     
-                    # Dispatch asynchronous SMS alert
-                    threading.Thread(
-                        target=send_sms_alert, 
-                        args=(hazard_detected.capitalize(), round(highest_confidence * 100, 1)),
-                        daemon=True
-                    ).start()
+                    # Only send SMS if the hazard is NOT vapour/vapor
+                    if hazard_detected.lower() not in ['vapour', 'vapor']:
+                        print("Dispatching urgent Twilio SMS...")
+                        threading.Thread(
+                            target=send_sms_alert, 
+                            args=(hazard_detected.capitalize(), round(highest_confidence * 100, 1)),
+                            daemon=True
+                        ).start()
+                    else:
+                        print("SMS bypassed for Vapour (Routine visual anomaly).")
                     
                     last_alert_time = current_time
+                    
         else:
             threat_frame_count = 0
 
