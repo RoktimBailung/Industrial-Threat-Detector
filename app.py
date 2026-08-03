@@ -107,7 +107,7 @@ time.sleep(1.0) # Warm up camera module
 # --- LOGIC VARIABLES ---
 last_alert_time = 0
 ALERT_COOLDOWN = 30  # Seconds before dispatching next SMS
-REQUIRED_THREAT_FRAMES = 3
+REQUIRED_THREAT_FRAMES = 5
 CONF_THRESHOLD = 0.75
 threat_frame_count = 0
 
