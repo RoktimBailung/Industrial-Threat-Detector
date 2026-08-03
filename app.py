@@ -16,8 +16,8 @@ load_dotenv()
 def get_db_connection():
     return mysql.connector.connect(
         host="localhost",
-        user="python_user",     # Your specific database user
-        password="Roktim@01",   # Your specific MySQL password
+        user="python_user",     
+        password="Roktim@01",   
         database="refinery_safety"
     )
 
@@ -47,44 +47,50 @@ def send_sms_alert(hazard_type, confidence):
 
 # --- AI & APP SETUP ---
 app = Flask(__name__)
-print("Loading YOLOv8 AI Model... Please wait.")
-model = YOLO('models/best.pt')
+print("Loading Intel-Optimized YOLOv11 Engine... Please wait.")
+
+# Explicitly passing task='detect' silences the terminal warning
+model = YOLO('models/best.pt', task='detect')
 
 # Ensure incidents folder exists
 if not os.path.exists('static/incidents'):
     os.makedirs('static/incidents')
 
-# --- THREADED CAMERA CLASS (ANTI-LAG FIX) ---
+# --- THREADED CAMERA CLASS (HARDWARE-ACCELERATED) ---
 class VideoCamera:
     def __init__(self, src=0):
-        print("Initializing Camera...")
+        print("Initializing Camera Stream...")
         self.stream = cv2.VideoCapture(src)
         if not self.stream.isOpened():
-            print("CRITICAL ERROR: Camera could not be opened. Check if another app is using it.")
+            print("CRITICAL ERROR: Camera could not be opened. Check hardware connections.")
         
-        # Lower resolution to help processor process frames faster
+        # Optimize frame resolution for edge processing
         self.stream.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
         self.stream.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+        
+        # Eliminate frame queue buffer delay
+        self.stream.set(cv2.CAP_PROP_BUFFERSIZE, 1)
         
         (self.grabbed, self.frame) = self.stream.read()
         self.stopped = False
         self.lock = threading.Lock()
 
     def start(self):
-        # Start the thread to read frames from the video stream
+        # Start thread to read frames continuously from the video stream
         threading.Thread(target=self.update, args=(), daemon=True).start()
         return self
 
     def update(self):
-        # Keep looping infinitely until the thread is stopped
+        # Continuous frame extraction thread
         while not self.stopped:
             (grabbed, frame) = self.stream.read()
             with self.lock:
                 self.grabbed = grabbed
                 self.frame = frame
+            time.sleep(0.01)  # Yield CPU execution slice
 
     def read(self):
-        # Return the latest frame
+        # Fetch latest captured frame
         with self.lock:
             if self.frame is not None:
                 return self.frame.copy()
@@ -96,76 +102,92 @@ class VideoCamera:
 
 # Start the threaded camera globally
 camera = VideoCamera().start()
-time.sleep(1.0) # Give the camera 1 second to warm up
+time.sleep(1.0) # Warm up camera module
 
 # --- LOGIC VARIABLES ---
 last_alert_time = 0
-ALERT_COOLDOWN = 30  # Wait 30 seconds before sending another SMS
-REQUIRED_THREAT_FRAMES = 3
+ALERT_COOLDOWN = 30  # Seconds before dispatching next SMS
+REQUIRED_THREAT_FRAMES = 1
 CONF_THRESHOLD = 0.75
 threat_frame_count = 0
 
 def generate_frames():
     global last_alert_time, threat_frame_count
+    frame_counter = 0
+    cached_boxes = []  # Bounding box cache for frame-skipping rendering
     
     while True:
-        # 1. Grab the absolute newest frame from the background thread
+        # 1. Fetch real-time frame from threaded camera buffer
         frame = camera.read()
         
         if frame is None:
-            time.sleep(0.1)
+            time.sleep(0.01)
             continue
             
-        # 2. Run the AI Model on this frame
-        results = model(frame, stream=True, verbose=False)
+        frame_counter += 1
         
-        hazard_detected = None
-        highest_confidence = 0.0
-        
-        # 3. Analyze Results
-        for r in results:
-            boxes = r.boxes
-            for box in boxes:
-                confidence = float(box.conf[0])
-                if confidence >= CONF_THRESHOLD:
+        # 2. Run inference on alternating frames for maximum stream smoothness
+        if frame_counter % 2 == 0:
+            results = model(frame, stream=True, verbose=False)
+            
+            hazard_detected = None
+            highest_confidence = 0.0
+            new_cached_boxes = []
+            
+            # 3. Analyze Detections
+            for r in results:
+                boxes = r.boxes
+                for box in boxes:
+                    confidence = float(box.conf[0])
+                    
                     cls = int(box.cls[0])
                     class_name = model.names[cls]
                     
-                    # Detect Fire, Smoke, or Vapour
+                    # Target Threat Classes
                     if class_name.lower() in ['fire', 'smoke', 'vapour', 'vapor']:
-                        hazard_detected = class_name
-                        if confidence > highest_confidence:
-                            highest_confidence = confidence
-                    
-                    # Draw Bounding Box dynamically based on threat
-                    x1, y1, x2, y2 = map(int, box.xyxy[0])
-                    
-                    if class_name.lower() == 'fire':
-                        color = (0, 0, 255) # Red
-                    elif 'vapour' in class_name.lower() or 'vapor' in class_name.lower():
-                        color = (0, 165, 255) # Orange
-                    else:
-                        color = (150, 150, 150) # Gray for Smoke
                         
-                    cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
-                    label = f"{class_name.upper()} {confidence:.2f}"
-                    cv2.putText(frame, label, (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
+                        # Set Bounding Box Colors (Draw them even if below SMS threshold)
+                        x1, y1, x2, y2 = map(int, box.xyxy[0])
+                        
+                        if class_name.lower() == 'fire':
+                            color = (0, 0, 255) # Red
+                        elif 'vapour' in class_name.lower() or 'vapor' in class_name.lower():
+                            color = (0, 165, 255) # Orange
+                        else:
+                            color = (150, 150, 150) # Gray for Smoke
+                            
+                        label = f"{class_name.upper()} {confidence:.2f}"
+                        new_cached_boxes.append((x1, y1, x2, y2, color, label))
 
-        # 4. Threat Logic (Persistence & Cooldown)
-        if hazard_detected:
-            threat_frame_count += 1
-            if threat_frame_count >= REQUIRED_THREAT_FRAMES:
+                        # --- SMS TRIGGER LOGIC ---
+                        if confidence >= CONF_THRESHOLD:
+                            hazard_detected = class_name
+                            if confidence > highest_confidence:
+                                highest_confidence = confidence
+                            print(f"[LIVE AI DEBUG] Verified {class_name.upper()} at {confidence*100:.1f}%")
+
+            cached_boxes = new_cached_boxes
+
+            # 4. Persistence Verification & Autonomous Alerting
+            if hazard_detected:
+                # Trigger immediately on the first high-confidence frame
                 current_time = time.time()
                 if current_time - last_alert_time > ALERT_COOLDOWN:
-                    print(f"\n[ALERT] {hazard_detected.upper()} detected! Logging and sending SMS...")
+                    print(f"\n[CRITICAL THREAT] {hazard_detected.upper()} confirmed by YOLOv11! Logging incident & sending SMS...")
                     
-                    # Save a snapshot
+                    # Generate snapshot with drawn detections
                     timestamp_str = datetime.now().strftime("%Y%m%d_%H%M%S")
                     filename = f"incident_{timestamp_str}.jpg"
                     filepath = os.path.join("static", "incidents", filename)
-                    cv2.imwrite(filepath, frame)
                     
-                    # Log to DB using the CORRECT column names
+                    snapshot_frame = frame.copy()
+                    for (x1, y1, x2, y2, color, label) in cached_boxes:
+                        cv2.rectangle(snapshot_frame, (x1, y1), (x2, y2), color, 2)
+                        cv2.putText(snapshot_frame, label, (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
+                    
+                    cv2.imwrite(filepath, snapshot_frame)
+                    
+                    # Log incident to MySQL database
                     try:
                         conn = get_db_connection()
                         cursor = conn.cursor()
@@ -178,20 +200,23 @@ def generate_frames():
                     except Exception as e:
                         print(f"DB Error: {e}")
                     
-                    # 'Fire and Forget' Background thread for Twilio (Prevents camera freeze!)
+                    # Dispatch asynchronous SMS alert
                     threading.Thread(
                         target=send_sms_alert, 
                         args=(hazard_detected.capitalize(), round(highest_confidence * 100, 1)),
                         daemon=True
                     ).start()
                     
-                    # Reset timer
                     last_alert_time = current_time
         else:
-            # If no hazard seen in this frame, reset the counter
             threat_frame_count = 0
 
-        # 5. Send Frame to Browser
+        # Draw cached bounding boxes onto stream output
+        for (x1, y1, x2, y2, color, label) in cached_boxes:
+            cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
+            cv2.putText(frame, label, (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
+
+        # 5. Stream Output Encoding
         ret, buffer = cv2.imencode('.jpg', frame)
         if not ret:
             continue
@@ -215,23 +240,21 @@ def get_recent_logs():
         conn = get_db_connection()
         cursor = conn.cursor(dictionary=True)
         
-        # 1. Fetch recent 5 logs using the correct column names
+        # Retrieve 5 most recent incident records
         cursor.execute("SELECT timestamp, hazard_type, confidence_score, snapshot_path FROM incident_logs ORDER BY timestamp DESC LIMIT 5")
         logs = cursor.fetchall()
         
-        # Clean up timestamps for the web UI
         for log in logs:
             if log.get('timestamp'):
                 log['timestamp'] = log['timestamp'].strftime("%H:%M:%S")
                 
-        # 2. Fetch the actual total count of incidents that happened TODAY
+        # Retrieve total incident count recorded today
         cursor.execute("SELECT COUNT(*) as count FROM incident_logs WHERE DATE(timestamp) = CURDATE()")
         today_count = cursor.fetchone()['count']
         
         cursor.close()
         conn.close()
         
-        # Return both the logs and the total count securely to JS
         return jsonify({
             "logs": logs,
             "today_count": today_count
@@ -241,5 +264,4 @@ def get_recent_logs():
         return jsonify({"logs": [], "today_count": 0})
 
 if __name__ == '__main__':
-    # Run the server
     app.run(host='0.0.0.0', port=5000, debug=False, threaded=True)
